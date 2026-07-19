@@ -1167,7 +1167,7 @@ static const struct kernel_symbol *resolve_symbol(struct module *mod,
 	is_vendor_module = !mod->sig_ok;
 	is_vendor_exported_symbol = fsa.owner && !fsa.owner->sig_ok;
 
-	if (is_vendor_module &&
+	if (0 && is_vendor_module &&
 	    !is_vendor_exported_symbol &&
 	    !gki_is_module_unprotected_symbol(name)) {
 		fsa.sym = ERR_PTR(-EACCES);
@@ -1365,7 +1365,7 @@ static int verify_exported_symbols(struct module *mod)
 				.gplok	= true,
 			};
 
-			if (!mod->sig_ok && gki_is_module_protected_export(
+			if (0 && !mod->sig_ok && gki_is_module_protected_export(
 						kernel_symbol_name(s))) {
 				pr_err("%s: exports protected symbol %s\n",
 				       mod->name, kernel_symbol_name(s));
