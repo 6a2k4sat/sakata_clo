@@ -194,12 +194,10 @@ out:
 	ufshcd_rpm_put_sync(hba);
 	kfree(buff);
 	bsg_reply->result = ret;
+	job->reply_len = !rpmb ? sizeof(struct ufs_bsg_reply) : sizeof(struct ufs_rpmb_reply);
 	/* complete the job here only if no error */
-	if (ret == 0) {
-		job->reply_len = rpmb ? sizeof(struct ufs_rpmb_reply) :
-					sizeof(struct ufs_bsg_reply);
+	if (ret == 0)
 		bsg_job_done(job, ret, bsg_reply->reply_payload_rcv_len);
-	}
 
 	return ret;
 }
@@ -218,7 +216,6 @@ void ufs_bsg_remove(struct ufs_hba *hba)
 		return;
 
 	bsg_remove_queue(hba->bsg_queue);
-	hba->bsg_queue = NULL;
 
 	device_del(bsg_dev);
 	put_device(bsg_dev);
