@@ -200,6 +200,17 @@ config MODULE_SCMVERSION
 
 	  If unsure, say N.
 
+config MCA_BYPASS
+	bool "Xiaomi MCA bypass charging enhancement"
+	depends on ARM64 && KPROBES
+	default n
+	help
+	  Enable guarded runtime patching of Xiaomi MI Charge Architecture
+	  vendor modules to improve bypass charging behavior.
+
+	  Only input-current and input-voltage votes are adjusted. Battery
+	  fast-charge-current and float-voltage votes remain untouched.
+
 config MODULE_SIG
 	bool "Module signature verification"
 	select MODULE_SIG_FORMAT

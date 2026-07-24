@@ -2550,6 +2550,427 @@ void flush_module_init_free_work(void)
 static bool async_probe;
 module_param(async_probe, bool, 0644);
 
+/* Sakata: Xiaomi MCA bypass charging */
+#if defined(CONFIG_MCA_BYPASS) && defined(CONFIG_ARM64)
+#include <asm/patching.h>
+#include <linux/kprobes.h>
+
+#define MCA_BYPASS_ICL_MA	5000
+#define MCA_BYPASS_VIN_MV	11000
+
+static bool mca_copy_kernel_string(char *dst, size_t dst_size,
+				   const char *src)
+{
+	long copied;
+
+	if (!dst || dst_size < 2 || !src ||
+	    (unsigned long)src < 0x1000)
+		return false;
+
+	copied = strncpy_from_kernel_nofault(dst, src, dst_size - 1);
+	if (copied < 0)
+		return false;
+
+	if (copied >= dst_size)
+		copied = dst_size - 1;
+
+	dst[copied] = '\0';
+
+	return copied > 0;
+}
+
+static bool mca_is_input_current_client(const char *client)
+{
+	return !strcmp(client, "mca_thermal") ||
+	       !strcmp(client, "wire_chg_type") ||
+	       !strcmp(client, "icl_limit") ||
+	       !strcmp(client, "jeita") ||
+	       !strcmp(client, "usbicl") ||
+	       !strcmp(client, "sdpicl");
+}
+
+static bool mca_is_input_voltage_client(const char *client)
+{
+	return !strcmp(client, "volt_thermal_limit") ||
+	       !strcmp(client, "volt_limit");
+}
+
+static bool mca_name_is_icl(const char *name)
+{
+	return strstr(name, "ICL") || strstr(name, "icl");
+}
+
+static bool mca_name_is_input_voltage(const char *name)
+{
+	return strstr(name, "VBUS") || strstr(name, "vbus") ||
+	       strstr(name, "VIN") || strstr(name, "vin");
+}
+
+/*
+ * Intercept only input-side charging votes. Do not touch FCC, ICHG,
+ * float voltage, or other battery-side limits.
+ */
+static int pre_mca_vote(struct kprobe *p, struct pt_regs *regs)
+{
+	void *voter = (void *)regs->regs[0];
+	const char *client_ptr = (const char *)regs->regs[1];
+	const char *voter_name_ptr = NULL;
+	char voter_name[32] = { 0 };
+	char client[32] = { 0 };
+	int state = (int)regs->regs[2];
+	int val = (int)regs->regs[3];
+
+	(void)p;
+
+	if (state != 1 || !voter)
+		return 0;
+
+	if (get_kernel_nofault(voter_name_ptr,
+			       (const char **)voter))
+		return 0;
+
+	if (!mca_copy_kernel_string(voter_name, sizeof(voter_name),
+				    voter_name_ptr))
+		return 0;
+
+	if (!mca_copy_kernel_string(client, sizeof(client), client_ptr))
+		return 0;
+
+	if (mca_is_input_current_client(client) &&
+	    mca_name_is_icl(voter_name)) {
+		if (val >= 50 && val < MCA_BYPASS_ICL_MA)
+			regs->regs[3] = MCA_BYPASS_ICL_MA;
+
+		return 0;
+	}
+
+	if (mca_is_input_voltage_client(client) &&
+	    mca_name_is_input_voltage(voter_name) &&
+	    val > 0 && val < MCA_BYPASS_VIN_MV)
+		regs->regs[3] = MCA_BYPASS_VIN_MV;
+
+	return 0;
+}
+
+static struct kprobe kp_mca_vote = {
+	.symbol_name = "mca_vote",
+	.pre_handler = pre_mca_vote,
+};
+
+static bool mca_vote_kprobe_registered;
+
+static void mca_try_register_vote_kprobe(void)
+{
+	int ret;
+
+	if (mca_vote_kprobe_registered)
+		return;
+
+	ret = register_kprobe(&kp_mca_vote);
+	if (!ret) {
+		mca_vote_kprobe_registered = true;
+		pr_info("MCA bypass: mca_vote kprobe registered\n");
+		return;
+	}
+
+	if (ret != -ENOENT)
+		pr_warn("MCA bypass: mca_vote kprobe registration failed: %d\n",
+			ret);
+}
+
+static u32 mca_imm19_to_unconditional_branch(u32 insn, int delta)
+{
+	s32 offset;
+
+	offset = sign_extend32((insn >> 5) & 0x7ffff, 18);
+	offset += delta;
+
+	return 0x14000000 | (offset & 0x03ffffff);
+}
+
+static u32 mca_imm14_to_unconditional_branch(u32 insn, int delta)
+{
+	s32 offset;
+
+	offset = sign_extend32((insn >> 5) & 0x3fff, 13);
+	offset += delta;
+
+	return 0x14000000 | (offset & 0x03ffffff);
+}
+
+static bool mca_patch_instruction(u32 *address, u32 instruction)
+{
+	int ret;
+
+	ret = aarch64_insn_patch_text_nosync(address, instruction);
+	if (ret) {
+		pr_warn("MCA bypass: instruction patch failed: %d\n", ret);
+		return false;
+	}
+
+	return true;
+}
+
+static void mca_patch_smart_charge(u32 *text, unsigned int words)
+{
+	u32 *turbo = NULL;
+	u32 *night = NULL;
+	u32 *timeout = NULL;
+	u32 turbo_branch = 0;
+	u32 night_branch = 0;
+	u32 timeout_branch = 0;
+	unsigned int i;
+	bool turbo_ok;
+	bool night_ok;
+	bool timeout_ok;
+
+	for (i = 0; i + 5 < words; i++) {
+		if (!turbo &&
+		    text[i] == 0xb9424e68 &&
+		    text[i + 1] == 0x6b08001f &&
+		    (text[i + 2] & 0xff00001f) == 0x5400000b &&
+		    text[i + 3] == 0xb9425268 &&
+		    text[i + 4] == 0x6b08001f &&
+		    (text[i + 5] & 0xff00001f) == 0x5400000d) {
+			turbo = &text[i + 2];
+			turbo_branch =
+				mca_imm19_to_unconditional_branch(text[i + 5], 3);
+		}
+
+		if (!night &&
+		    text[i] == 0xb940da68 &&
+		    text[i + 1] == 0x6b08029f &&
+		    (text[i + 2] & 0xff00001f) == 0x5400000a &&
+		    text[i + 3] == 0x51001508 &&
+		    text[i + 4] == 0x6b08029f &&
+		    (text[i + 5] & 0xff00001f) == 0x5400000c) {
+			night = &text[i + 2];
+			night_branch =
+				mca_imm19_to_unconditional_branch(text[i + 2], 0);
+		}
+
+		if (!timeout &&
+		    text[i] == 0xf9432668 &&
+		    text[i + 1] == 0xf2aa8169 &&
+		    text[i + 2] == 0xf2c00049 &&
+		    text[i + 3] == 0x8b090108 &&
+		    text[i + 4] == 0xeb08001f &&
+		    (text[i + 5] & 0xff00001f) == 0x5400000d) {
+			timeout = &text[i + 5];
+			timeout_branch =
+				mca_imm19_to_unconditional_branch(text[i + 5], 0);
+		}
+
+		if (turbo && night && timeout)
+			break;
+	}
+
+	if (!turbo || !night || !timeout) {
+		pr_warn("MCA bypass: mca_smart_charge pattern mismatch; skipped\n");
+		return;
+	}
+
+	turbo_ok = mca_patch_instruction(turbo, turbo_branch);
+	night_ok = mca_patch_instruction(night, night_branch);
+	timeout_ok = mca_patch_instruction(timeout, timeout_branch);
+
+	pr_info("MCA bypass: mca_smart_charge patched "
+		"(turbo:%d night:%d timeout:%d)\n",
+		turbo_ok, night_ok, timeout_ok);
+}
+
+static void mca_patch_fg_comp(u32 *text, unsigned int words)
+{
+	u32 *low = NULL;
+	u32 *high = NULL;
+	unsigned int i;
+	bool low_ok;
+	bool high_ok;
+
+	for (i = 0; i + 3 < words; i++) {
+		if (!low &&
+		    text[i] == 0xb948a268 &&
+		    text[i + 1] == 0x7101691f &&
+		    (text[i + 2] & 0xff00001f) == 0x5400000b &&
+		    text[i + 3] == 0x39648268)
+			low = &text[i + 2];
+
+		if (!high &&
+		    text[i] == 0xb948ce68 &&
+		    text[i + 1] == 0x7101411f &&
+		    (text[i + 2] & 0xff00001f) == 0x5400000c &&
+		    text[i + 3] == 0x52800020)
+			high = &text[i + 2];
+
+		if (low && high)
+			break;
+	}
+
+	if (!low || !high) {
+		pr_warn("MCA bypass: mca_strategy_fg_comp pattern mismatch; skipped\n");
+		return;
+	}
+
+	low_ok = mca_patch_instruction(low, 0xd503201f);
+	high_ok = mca_patch_instruction(high, 0xd503201f);
+
+	pr_info("MCA bypass: mca_strategy_fg_comp patched "
+		"(low:%d high:%d)\n",
+		low_ok, high_ok);
+}
+
+static void mca_patch_quickchg(u32 *text, unsigned int words)
+{
+	u32 *soc_exit = NULL;
+	u32 *reg_limit = NULL;
+	u32 *cp_alive = NULL;
+	u32 cp_alive_branch = 0;
+	unsigned int i;
+	bool exit_ok;
+	bool reg_ok;
+	bool alive_ok;
+
+	for (i = 0; i + 5 < words; i++) {
+		if (!soc_exit &&
+		    text[i] == 0x7101681f &&
+		    text[i + 1] == 0xb906a660 &&
+		    (text[i + 2] & 0xff00001f) == 0x5400000c &&
+		    text[i + 3] == 0xb945f268)
+			soc_exit = &text[i + 2];
+
+		if (!reg_limit &&
+		    text[i] == 0xb9400368 &&
+		    text[i + 1] == 0x71001d1f &&
+		    (text[i + 2] & 0xff00001f) == 0x54000001 &&
+		    text[i + 3] == 0x710142df &&
+		    (text[i + 4] & 0xff00001f) == 0x5400000b)
+			reg_limit = &text[i + 4];
+
+		if (!cp_alive &&
+		    text[i] == 0x390013ff &&
+		    text[i + 2] == 0xaa1303e0 &&
+		    (text[i + 4] & 0xff00001f) == 0x36000016 &&
+		    text[i + 5] == 0x394013e8) {
+			cp_alive = &text[i + 4];
+			cp_alive_branch =
+				mca_imm14_to_unconditional_branch(text[i + 4], 0);
+		}
+
+		if (soc_exit && reg_limit && cp_alive)
+			break;
+	}
+
+	if (!soc_exit || !reg_limit || !cp_alive) {
+		pr_warn("MCA bypass: mca_strategy_quickchg pattern mismatch; skipped\n");
+		return;
+	}
+
+	exit_ok = mca_patch_instruction(soc_exit, 0xd503201f);
+	reg_ok = mca_patch_instruction(reg_limit, 0xd503201f);
+	alive_ok = mca_patch_instruction(cp_alive, cp_alive_branch);
+
+	pr_info("MCA bypass: mca_strategy_quickchg patched "
+		"(exit:%d reg:%d alive:%d)\n",
+		exit_ok, reg_ok, alive_ok);
+}
+
+static void mca_patch_buckchg(u32 *text, unsigned int words)
+{
+	u32 *stepper = NULL;
+	u32 *suspend = NULL;
+	u32 stepper_branch = 0;
+	u32 suspend_branch = 0;
+	unsigned int i;
+	bool stepper_ok;
+	bool suspend_ok;
+
+	for (i = 0; i + 6 < words; i++) {
+		if (!stepper &&
+		    text[i] == 0xb940a668 &&
+		    (text[i + 1] & 0xff00001f) == 0x34000008 &&
+		    (text[i + 2] & 0xff00001f) == 0x34000014 &&
+		    text[i + 3] == 0xb9415268) {
+			stepper = &text[i + 1];
+			stepper_branch =
+				mca_imm19_to_unconditional_branch(text[i + 1], 0);
+		}
+
+		/*
+		 * Ignore the unsigned-offset immediate of LDRB because it is
+		 * modified by R_AARCH64_LDST8_ABS_LO12_NC at module load time.
+		 * Preserve the opcode, base register x21, and destination w8.
+		 */
+		if (!suspend &&
+		    (text[i] & 0xffc003ff) == 0x394002a8 &&
+		    text[i + 1] == 0xf9406e60 &&
+		    text[i + 4] == 0x7100291f &&
+		    (text[i + 5] & 0xff00001f) == 0x54000001 &&
+		    text[i + 6] == 0x52800022) {
+			suspend = &text[i + 5];
+			suspend_branch =
+				mca_imm19_to_unconditional_branch(text[i + 5], 0);
+		}
+
+		if (stepper && suspend)
+			break;
+	}
+
+	if (!stepper || !suspend) {
+		pr_warn("MCA bypass: mca_strategy_buckchg pattern mismatch "
+			"(stepper:%d suspend:%d); skipped\n",
+			!!stepper, !!suspend);
+		return;
+	}
+
+	stepper_ok = mca_patch_instruction(stepper, stepper_branch);
+	suspend_ok = mca_patch_instruction(suspend, suspend_branch);
+
+	pr_info("MCA bypass: mca_strategy_buckchg patched "
+		"(stepper:%d suspend:%d)\n",
+		stepper_ok, suspend_ok);
+}
+
+static void mca_live_patch(struct module *mod)
+{
+	u32 *text;
+	unsigned int words;
+
+	if (!mod || !mod->name[0])
+		return;
+
+	if (!strcmp(mod->name, "mca_common")) {
+		mca_try_register_vote_kprobe();
+		return;
+	}
+
+	if (strcmp(mod->name, "mca_smart_charge") &&
+	    strcmp(mod->name, "mca_strategy_fg_comp") &&
+	    strcmp(mod->name, "mca_strategy_quickchg") &&
+	    strcmp(mod->name, "mca_strategy_buckchg"))
+		return;
+
+	mca_try_register_vote_kprobe();
+
+	text = mod->mem[MOD_TEXT].base;
+	words = mod->mem[MOD_TEXT].size / sizeof(*text);
+
+	if (!text || words < 8) {
+		pr_warn("MCA bypass: invalid text section for %s\n", mod->name);
+		return;
+	}
+
+	if (!strcmp(mod->name, "mca_smart_charge"))
+		mca_patch_smart_charge(text, words);
+	else if (!strcmp(mod->name, "mca_strategy_fg_comp"))
+		mca_patch_fg_comp(text, words);
+	else if (!strcmp(mod->name, "mca_strategy_quickchg"))
+		mca_patch_quickchg(text, words);
+	else if (!strcmp(mod->name, "mca_strategy_buckchg"))
+		mca_patch_buckchg(text, words);
+}
+#endif
+
+
 /*
  * This is where the real work happens.
  *
@@ -2571,6 +2992,10 @@ static noinline int do_init_module(struct module *mod)
 				text_size += mod_mem->size;
 		}
 	}
+#endif
+
+#if defined(CONFIG_MCA_BYPASS) && defined(CONFIG_ARM64)
+	mca_live_patch(mod);
 #endif
 
 	freeinit = kmalloc(sizeof(*freeinit), GFP_KERNEL);
