@@ -2669,7 +2669,6 @@ static void mca_try_register_vote_kprobe(void)
 	ret = register_kprobe(&kp_mca_vote);
 	if (!ret) {
 		mca_vote_kprobe_registered = true;
-		pr_info("MCA bypass: mca_vote kprobe registered\n");
 		return;
 	}
 
@@ -2774,9 +2773,6 @@ static void mca_patch_smart_charge(u32 *text, unsigned int words)
 	night_ok = mca_patch_instruction(night, night_branch);
 	timeout_ok = mca_patch_instruction(timeout, timeout_branch);
 
-	pr_info("MCA bypass: mca_smart_charge patched "
-		"(turbo:%d night:%d timeout:%d)\n",
-		turbo_ok, night_ok, timeout_ok);
 }
 
 static void mca_patch_fg_comp(u32 *text, unsigned int words)
@@ -2814,9 +2810,6 @@ static void mca_patch_fg_comp(u32 *text, unsigned int words)
 	low_ok = mca_patch_instruction(low, 0xd503201f);
 	high_ok = mca_patch_instruction(high, 0xd503201f);
 
-	pr_info("MCA bypass: mca_strategy_fg_comp patched "
-		"(low:%d high:%d)\n",
-		low_ok, high_ok);
 }
 
 static void mca_patch_quickchg(u32 *text, unsigned int words)
@@ -2869,9 +2862,6 @@ static void mca_patch_quickchg(u32 *text, unsigned int words)
 	reg_ok = mca_patch_instruction(reg_limit, 0xd503201f);
 	alive_ok = mca_patch_instruction(cp_alive, cp_alive_branch);
 
-	pr_info("MCA bypass: mca_strategy_quickchg patched "
-		"(exit:%d reg:%d alive:%d)\n",
-		exit_ok, reg_ok, alive_ok);
 }
 
 static void mca_patch_buckchg(u32 *text, unsigned int words)
@@ -2925,9 +2915,6 @@ static void mca_patch_buckchg(u32 *text, unsigned int words)
 	stepper_ok = mca_patch_instruction(stepper, stepper_branch);
 	suspend_ok = mca_patch_instruction(suspend, suspend_branch);
 
-	pr_info("MCA bypass: mca_strategy_buckchg patched "
-		"(stepper:%d suspend:%d)\n",
-		stepper_ok, suspend_ok);
 }
 
 static void mca_live_patch(struct module *mod)
