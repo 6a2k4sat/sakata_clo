@@ -520,6 +520,14 @@ int fetch_cache_info(unsigned int cpu)
 			return -ENOENT;
 
 		this_cpu_ci->early_ci_levels = true;
+	} else if (acpi_disabled && use_arch_cache_info()) {
+		/*
+		 * DT cache nodes may omit optional geometry properties and
+		 * produce an inaccurate leaf count. Revalidate the topology
+		 * using the architectural cache description before populating
+		 * the cache leaves.
+		 */
+		this_cpu_ci->early_ci_levels = true;
 	}
 
 	return allocate_cache_info(cpu);
