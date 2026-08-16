@@ -19,6 +19,12 @@
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
+#include <linux/fs.h>
+#include <linux/init.h>
+#include <linux/initrd.h>
+#include <linux/kernel.h>
+#include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/module.h>
 #include <linux/regulator/consumer.h>
 #include <linux/sched/clock.h>
@@ -152,6 +158,88 @@ MODULE_PARM_DESC(uic_cmd_timeout,
 		       __len > 4 ? DUMP_PREFIX_OFFSET : DUMP_PREFIX_NONE,\
 		       16, 4, buf, __len, false);                        \
 } while (0)
+
+#define UFS_BOOT_PROP	"/system/etc/ramdisk/build.prop"
+#define UFS_BOOT_FP	"ro.bootimage.build.fingerprint="
+
+static bool dev_cmd_persistent = true;
+
+static int __init ufshcd_dev_cmd_mode_init(void)
+{
+	struct file *file;
+	char *buf, *fp, *os, *end;
+	unsigned int major, minor, patch, build;
+	loff_t pos = 0;
+	ssize_t len;
+
+	wait_for_initramfs();
+
+	file = filp_open(UFS_BOOT_PROP, O_RDONLY, 0);
+	if (IS_ERR(file))
+		goto unknown;
+
+	buf = kzalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!buf) {
+		filp_close(file, NULL);
+		goto unknown;
+	}
+
+	len = kernel_read(file, buf, PAGE_SIZE - 1, &pos);
+	filp_close(file, NULL);
+
+	if (len <= 0)
+		goto free;
+
+	buf[len] = '\0';
+
+	fp = strstr(buf, UFS_BOOT_FP);
+	if (!fp)
+		goto free;
+
+	fp += strlen(UFS_BOOT_FP);
+
+	end = strchr(fp, '\n');
+	if (end)
+		*end = '\0';
+
+	os = strstr(fp, "/OS");
+	if (!os)
+		goto free;
+
+	os += 3;
+
+	if (sscanf(os, "%u.%u.%u.%u",
+		   &major, &minor, &patch, &build) != 4)
+		goto free;
+
+	dev_cmd_persistent =
+		major > 3 ||
+		(major == 3 && minor > 0) ||
+		(major == 3 && minor == 0 && patch >= 305);
+
+	pr_info("ufs: dev_cmd completion: %s (OS%u.%u.%u.%u)\n",
+		dev_cmd_persistent ? "persistent" : "legacy",
+		major, minor, patch, build);
+
+	kfree(buf);
+	return 0;
+
+free:
+	kfree(buf);
+unknown:
+	pr_info("ufs: dev_cmd completion: persistent (unknown firmware)\n");
+	return 0;
+}
+late_initcall(ufshcd_dev_cmd_mode_init);
+
+static struct completion *ufshcd_dev_cmd_compl(struct ufs_hba *hba,
+					       struct completion *wait)
+{
+	if (READ_ONCE(dev_cmd_persistent))
+		return &to_hba_priv(hba)->dev_cmd_compl;
+
+	return wait;
+}
 
 int ufshcd_dump_regs(struct ufs_hba *hba, size_t offset, size_t len,
 		     const char *prefix)
@@ -3181,6 +3269,7 @@ retry:
 static int ufshcd_exec_dev_cmd(struct ufs_hba *hba,
 		enum dev_cmd_type cmd_type, int timeout)
 {
+	DECLARE_COMPLETION_ONSTACK(wait);
 	const u32 tag = hba->reserved_slot;
 	struct ufshcd_lrb *lrbp;
 	int err;
@@ -3196,7 +3285,7 @@ static int ufshcd_exec_dev_cmd(struct ufs_hba *hba,
 	if (unlikely(err))
 		goto out;
 
-	hba->dev_cmd.complete = &to_hba_priv(hba)->dev_cmd_compl;
+	hba->dev_cmd.complete = ufshcd_dev_cmd_compl(hba, &wait);
 
 	ufshcd_add_query_upiu_trace(hba, UFS_QUERY_SEND, lrbp->ucd_req_ptr);
 
@@ -7196,6 +7285,7 @@ static int ufshcd_issue_devman_upiu_cmd(struct ufs_hba *hba,
 					enum dev_cmd_type cmd_type,
 					enum query_opcode desc_op)
 {
+	DECLARE_COMPLETION_ONSTACK(wait);
 	const u32 tag = hba->reserved_slot;
 	struct ufshcd_lrb *lrbp;
 	int err = 0;
@@ -7237,7 +7327,7 @@ static int ufshcd_issue_devman_upiu_cmd(struct ufs_hba *hba,
 
 	memset(lrbp->ucd_rsp_ptr, 0, sizeof(struct utp_upiu_rsp));
 
-	hba->dev_cmd.complete = &to_hba_priv(hba)->dev_cmd_compl;
+	hba->dev_cmd.complete = ufshcd_dev_cmd_compl(hba, &wait);
 
 	ufshcd_add_query_upiu_trace(hba, UFS_QUERY_SEND, lrbp->ucd_req_ptr);
 
@@ -7365,6 +7455,7 @@ int ufshcd_advanced_rpmb_req_handler(struct ufs_hba *hba, struct utp_upiu_req *r
 			 struct ufs_ehs *rsp_ehs, int sg_cnt, struct scatterlist *sg_list,
 			 enum dma_data_direction dir)
 {
+	DECLARE_COMPLETION_ONSTACK(wait);
 	const u32 tag = hba->reserved_slot;
 	struct ufshcd_lrb *lrbp;
 	int err = 0;
@@ -7413,7 +7504,7 @@ int ufshcd_advanced_rpmb_req_handler(struct ufs_hba *hba, struct utp_upiu_req *r
 
 	memset(lrbp->ucd_rsp_ptr, 0, sizeof(struct utp_upiu_rsp));
 
-	hba->dev_cmd.complete = &to_hba_priv(hba)->dev_cmd_compl;
+	hba->dev_cmd.complete = ufshcd_dev_cmd_compl(hba, &wait);
 
 	ufshcd_send_command(hba, tag, hba->dev_cmd_queue);
 
