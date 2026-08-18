@@ -162,7 +162,7 @@ MODULE_PARM_DESC(uic_cmd_timeout,
 #define UFS_BOOT_PROP	"/system/etc/ramdisk/build.prop"
 #define UFS_BOOT_FP	"ro.bootimage.build.fingerprint="
 
-static bool dev_cmd_persistent = true;
+static bool dev_cmd_legacy;
 
 static int __init ufshcd_dev_cmd_mode_init(void)
 {
@@ -176,25 +176,25 @@ static int __init ufshcd_dev_cmd_mode_init(void)
 
 	file = filp_open(UFS_BOOT_PROP, O_RDONLY, 0);
 	if (IS_ERR(file))
-		goto unknown;
+		return 0;
 
 	buf = kzalloc(PAGE_SIZE, GFP_KERNEL);
 	if (!buf) {
 		filp_close(file, NULL);
-		goto unknown;
+		return 0;
 	}
 
 	len = kernel_read(file, buf, PAGE_SIZE - 1, &pos);
 	filp_close(file, NULL);
 
 	if (len <= 0)
-		goto free;
+		goto out;
 
 	buf[len] = '\0';
 
 	fp = strstr(buf, UFS_BOOT_FP);
 	if (!fp)
-		goto free;
+		goto out;
 
 	fp += strlen(UFS_BOOT_FP);
 
@@ -204,42 +204,24 @@ static int __init ufshcd_dev_cmd_mode_init(void)
 
 	os = strstr(fp, "/OS");
 	if (!os)
-		goto free;
+		goto out;
 
 	os += 3;
 
 	if (sscanf(os, "%u.%u.%u.%u",
 		   &major, &minor, &patch, &build) != 4)
-		goto free;
+		goto out;
 
-	dev_cmd_persistent =
-		major > 3 ||
-		(major == 3 && minor > 0) ||
-		(major == 3 && minor == 0 && patch >= 305);
+	if (major < 3 ||
+	    (major == 3 && minor == 0 && patch < 305))
+		WRITE_ONCE(dev_cmd_legacy, true);
 
-	pr_info("ufs: dev_cmd completion: %s (OS%u.%u.%u.%u)\n",
-		dev_cmd_persistent ? "persistent" : "legacy",
-		major, minor, patch, build);
-
+out:
 	kfree(buf);
-	return 0;
-
-free:
-	kfree(buf);
-unknown:
-	pr_info("ufs: dev_cmd completion: persistent (unknown firmware)\n");
 	return 0;
 }
 late_initcall(ufshcd_dev_cmd_mode_init);
 
-static struct completion *ufshcd_dev_cmd_compl(struct ufs_hba *hba,
-					       struct completion *wait)
-{
-	if (READ_ONCE(dev_cmd_persistent))
-		return &to_hba_priv(hba)->dev_cmd_compl;
-
-	return wait;
-}
 
 int ufshcd_dump_regs(struct ufs_hba *hba, size_t offset, size_t len,
 		     const char *prefix)
@@ -3285,7 +3267,9 @@ static int ufshcd_exec_dev_cmd(struct ufs_hba *hba,
 	if (unlikely(err))
 		goto out;
 
-	hba->dev_cmd.complete = ufshcd_dev_cmd_compl(hba, &wait);
+	hba->dev_cmd.complete = &to_hba_priv(hba)->dev_cmd_compl;
+	if (READ_ONCE(dev_cmd_legacy))
+		hba->dev_cmd.complete = &wait;
 
 	ufshcd_add_query_upiu_trace(hba, UFS_QUERY_SEND, lrbp->ucd_req_ptr);
 
@@ -7327,7 +7311,9 @@ static int ufshcd_issue_devman_upiu_cmd(struct ufs_hba *hba,
 
 	memset(lrbp->ucd_rsp_ptr, 0, sizeof(struct utp_upiu_rsp));
 
-	hba->dev_cmd.complete = ufshcd_dev_cmd_compl(hba, &wait);
+	hba->dev_cmd.complete = &to_hba_priv(hba)->dev_cmd_compl;
+	if (READ_ONCE(dev_cmd_legacy))
+		hba->dev_cmd.complete = &wait;
 
 	ufshcd_add_query_upiu_trace(hba, UFS_QUERY_SEND, lrbp->ucd_req_ptr);
 
@@ -7504,7 +7490,9 @@ int ufshcd_advanced_rpmb_req_handler(struct ufs_hba *hba, struct utp_upiu_req *r
 
 	memset(lrbp->ucd_rsp_ptr, 0, sizeof(struct utp_upiu_rsp));
 
-	hba->dev_cmd.complete = ufshcd_dev_cmd_compl(hba, &wait);
+	hba->dev_cmd.complete = &to_hba_priv(hba)->dev_cmd_compl;
+	if (READ_ONCE(dev_cmd_legacy))
+		hba->dev_cmd.complete = &wait;
 
 	ufshcd_send_command(hba, tag, hba->dev_cmd_queue);
 
