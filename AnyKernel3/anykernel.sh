@@ -40,12 +40,9 @@ KSU_IMAGE="$AKHOME/Image-ksu.gz"
 command -v getevent >/dev/null 2>&1 ||
     abort "getevent is not available. Aborting..."
 
-ui_print " "
-ui_print "Select kernel variant:"
-ui_print " "
+ui_print " " "Select kernel variant:" " "
 ui_print "Volume UP   : Vanilla"
-ui_print "Volume DOWN : KernelSU + SUSFS"
-ui_print " "
+ui_print "Volume DOWN : KernelSU + SUSFS" " "
 
 key_click=""
 while [ -z "$key_click" ]; do
