@@ -4008,14 +4008,21 @@ static sint fill_radiotap_hdr(_adapter *padapter, union recv_frame *precvframe, 
 				(1<<IEEE80211_RADIOTAP_RADIOTAP_NAMESPACE);
 
 			for(i=0; i<pHalData->NumTotalRFPath-1; i++) {
-				memcpy(&hdr_buf[rt_len], &tmp_32bit, 4);
-				rt_len += 4;
+				if (rt_len > sizeof(hdr_buf) - 2 * sizeof(tmp_32bit))
+					break;
+
+				memcpy(&hdr_buf[rt_len], &tmp_32bit,
+				       sizeof(tmp_32bit));
+				rt_len += sizeof(tmp_32bit);
 			}
 		}
 		tmp_32bit = (1<<IEEE80211_RADIOTAP_ANTENNA) |
 			(1<<IEEE80211_RADIOTAP_DBM_ANTSIGNAL);
-		memcpy(&hdr_buf[rt_len], &tmp_32bit, 4);
-		rt_len += 4;
+		if (rt_len <= sizeof(hdr_buf) - sizeof(tmp_32bit)) {
+			memcpy(&hdr_buf[rt_len], &tmp_32bit,
+			       sizeof(tmp_32bit));
+			rt_len += sizeof(tmp_32bit);
+		}
 	}
 
 #ifdef CONFIG_RTL8814A
