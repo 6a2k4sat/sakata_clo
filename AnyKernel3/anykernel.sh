@@ -26,8 +26,60 @@ IS_SLOT_DEVICE=auto
 NO_MAGISK_CHECK=1
 
 # import functions/variables and setup patching - see for reference (DO NOT REMOVE)
-. tools/ak3-core.sh
+. tools/ak3-core.sh;
+
+VANILLA_IMAGE="$AKHOME/Image-vanilla.gz"
+KSU_IMAGE="$AKHOME/Image-ksu.gz"
+
+[ -f "$VANILLA_IMAGE" ] ||
+    abort "Image-vanilla.gz not found. Aborting..."
+
+[ -f "$KSU_IMAGE" ] ||
+    abort "Image-ksu.gz not found. Aborting..."
+
+command -v getevent >/dev/null 2>&1 ||
+    abort "getevent is not available. Aborting..."
+
+ui_print " "
+ui_print "Select kernel variant:"
+ui_print " "
+ui_print "Volume UP   : Vanilla"
+ui_print "Volume DOWN : KernelSU + SUSFS"
+ui_print " "
+
+key_click=""
+while [ -z "$key_click" ]; do
+    key_click="$(
+        getevent -qlc 1 2>/dev/null |
+        awk '{ print $3 }' |
+        grep 'KEY_VOLUME'
+    )"
+    sleep 0.2
+done
+
+case "$key_click" in
+    KEY_VOLUMEUP)
+        variant="Vanilla"
+        image="$VANILLA_IMAGE"
+        ;;
+    KEY_VOLUMEDOWN)
+        variant="KernelSU + SUSFS"
+        image="$KSU_IMAGE"
+        ;;
+    *)
+        abort "Unknown volume key. Aborting..."
+        ;;
+esac
+
+ui_print "Selected: $variant"
+rm -f "$AKHOME/Image" "$AKHOME/Image.gz"
+cp -f "$image" "$AKHOME/Image.gz" ||
+    abort "Failed to prepare selected kernel image!"
+
+sync
+ui_print "Preparing boot image..."
 
 # boot install
 split_boot
 flash_boot
+
