@@ -562,7 +562,7 @@ do_versioncheck;
 do_levelcheck;
 do_vendorlevelcheck;
 
-ui_print "Installing...";
+# ui_print "Installing...";
 ash anykernel.sh;
 if [ $? != 0 ]; then
   abort;
