@@ -164,11 +164,31 @@ MODULE_PARM_DESC(uic_cmd_timeout,
 
 static bool dev_cmd_legacy;
 
+static bool ufshcd_version_before(unsigned int major, unsigned int minor,
+				  unsigned int patch, unsigned int build,
+				  unsigned int req_major,
+				  unsigned int req_minor,
+				  unsigned int req_patch,
+				  unsigned int req_build)
+{
+	if (major != req_major)
+		return major < req_major;
+
+	if (minor != req_minor)
+		return minor < req_minor;
+
+	if (patch != req_patch)
+		return patch < req_patch;
+
+	return build < req_build;
+}
+
 static int __init ufshcd_dev_cmd_mode_init(void)
 {
 	struct file *file;
 	char *buf, *fp, *os, *end;
 	unsigned int major, minor, patch, build;
+	bool is_cn;
 	loff_t pos = 0;
 	ssize_t len;
 
@@ -212,9 +232,11 @@ static int __init ufshcd_dev_cmd_mode_init(void)
 		   &major, &minor, &patch, &build) != 4)
 		goto out;
 
-	if (major < 3 ||
-	    (major == 3 && minor == 0 && patch < 305))
-		WRITE_ONCE(dev_cmd_legacy, true);
+	is_cn = strstr(fp, "CNXM") != NULL;
+
+	WRITE_ONCE(dev_cmd_legacy,
+		   ufshcd_version_before(major, minor, patch, build,
+					 3, 0, is_cn ? 305 : 303, 0));
 
 out:
 	kfree(buf);
