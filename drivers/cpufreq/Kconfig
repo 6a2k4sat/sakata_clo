@@ -210,6 +210,22 @@ config CPU_FREQ_GOV_SCHEDUTIL
 
 	  If in doubt, say N.
 
+
+config CPU_FREQ_GOV_SX_SCHEDUTIL
+	bool "'sx_schedutil' cpufreq policy governor"
+	depends on CPU_FREQ
+	select CPU_FREQ_GOV_ATTR_SET
+	select IRQ_WORK
+	help
+	  SX Schedutil is a scheduler-driven CPU frequency governor derived
+	  directly from the schedutil implementation in this Linux 6.6 tree.
+
+	  This initial version intentionally preserves schedutil frequency
+	  selection and rate-limit behavior as a known-stable baseline while
+	  using an independent sxsu namespace for future tuning.
+
+	  If in doubt, say N.
+
 comment "CPU frequency scaling drivers"
 
 config CPUFREQ_DT
