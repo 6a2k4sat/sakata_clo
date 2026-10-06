@@ -25,7 +25,7 @@
  * The actual values remain writable through the schedutil sysfs interface.
  */
 #define SXSU_DEFAULT_UP_RATE_LIMIT_US		500U
-#define SXSU_DEFAULT_DOWN_RATE_LIMIT_US	5000U
+#define SXSU_DEFAULT_DOWN_RATE_LIMIT_US	4000U
 
 struct sxsu_tunables {
 	struct gov_attr_set	attr_set;
@@ -46,6 +46,7 @@ struct sxsu_policy {
 	s64			down_rate_delay_ns;
 	unsigned int		next_freq;
 	unsigned int		cached_raw_freq;
+	unsigned int		prev_cached_raw_freq;
 
 	/* The next fields are only needed if fast switch cannot be used: */
 	struct			irq_work irq_work;
@@ -158,6 +159,12 @@ static bool sxsu_update_next_freq(struct sxsu_policy *sg_policy, u64 time,
 	} else if (sg_policy->next_freq == next_freq) {
 		return false;
 	} else if (sxsu_up_down_rate_limit(sg_policy, time, next_freq)) {
+		/*
+		 * The new target was rejected by the directional rate limit.
+		 * Restore the previous raw request so an identical target can
+		 * be evaluated again once the rate-limit window has expired.
+		 */
+		sg_policy->cached_raw_freq = sg_policy->prev_cached_raw_freq;
 		return false;
 	}
 
@@ -242,6 +249,7 @@ static unsigned int get_next_freq(struct sxsu_policy *sg_policy,
 	if (freq == sg_policy->cached_raw_freq && !sg_policy->need_freq_update)
 		return sg_policy->next_freq;
 
+	sg_policy->prev_cached_raw_freq = sg_policy->cached_raw_freq;
 	sg_policy->cached_raw_freq = freq;
 	return cpufreq_driver_resolve_freq(policy, freq);
 }
@@ -948,6 +956,7 @@ static int sxsu_start(struct cpufreq_policy *policy)
 	sg_policy->work_in_progress		= false;
 	sg_policy->limits_changed		= false;
 	sg_policy->cached_raw_freq		= 0;
+	sg_policy->prev_cached_raw_freq		= 0;
 
 	sg_policy->need_freq_update = cpufreq_driver_test_flags(CPUFREQ_NEED_UPDATE_LIMITS);
 
