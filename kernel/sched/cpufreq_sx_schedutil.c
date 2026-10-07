@@ -208,6 +208,30 @@ unsigned long get_capacity_ref_freq(struct cpufreq_policy *policy)
 	return policy->cur + (policy->cur >> 2);
 }
 
+/*
+ * Keep the original schedutil DVFS headroom for medium and heavy loads,
+ * while trimming excess frequency requests in the light-load region.
+ *
+ *   util < 12.5%        : +12.5% headroom
+ *   12.5% <= util < 25% : +18.75% headroom
+ *   util >= 25%         : +25% headroom
+ *
+ * The full schedutil margin is therefore preserved once utilization reaches
+ * one quarter of CPU capacity, keeping sustained and latency-sensitive loads
+ * responsive while allowing light workloads to run more efficiently.
+ */
+static __always_inline
+unsigned long sxsu_apply_dvfs_headroom(unsigned long util, unsigned long max)
+{
+	if (util >= (max >> 2))
+		return util + (util >> 2);
+
+	if (util >= (max >> 3))
+		return util + (util >> 3) + (util >> 4);
+
+	return util + (util >> 3);
+}
+
 /**
  * get_next_freq - Compute a new frequency for a given cpufreq policy.
  * @sg_policy: schedutil policy object to compute the new frequency for.
@@ -224,7 +248,9 @@ unsigned long get_capacity_ref_freq(struct cpufreq_policy *policy)
  *
  * next_freq = C * curr_freq * util_raw / max
  *
- * Take C = 1.25 for the frequency tipping point at (util / max) = 0.8.
+ * sx_schedutil applies adaptive DVFS headroom before mapping utilization to
+ * frequency. Light utilization gets a smaller margin, while utilization at
+ * or above 25% of CPU capacity retains schedutil's original 25% headroom.
  *
  * The lowest driver-supported frequency which is equal or greater than the raw
  * next_freq (as calculated above) is returned, subject to policy min/max and
@@ -238,7 +264,7 @@ static unsigned int get_next_freq(struct sxsu_policy *sg_policy,
 	unsigned long next_freq = 0;
 
 	freq = get_capacity_ref_freq(policy);
-	util = map_util_perf(util);
+	util = sxsu_apply_dvfs_headroom(util, max);
 	trace_android_vh_map_util_freq(util, freq, max, &next_freq, policy,
 			&sg_policy->need_freq_update);
 	if (next_freq)
@@ -508,8 +534,11 @@ static void sxsu_update_single_perf(struct update_util_data *hook, u64 time,
 	    sxsu_cpu_is_busy(sg_cpu) && sg_cpu->util < prev_util)
 		sg_cpu->util = prev_util;
 
-	cpufreq_driver_adjust_perf(sg_cpu->cpu, map_util_perf(sg_cpu->bw_dl),
-				   map_util_perf(sg_cpu->util), max_cap);
+	cpufreq_driver_adjust_perf(sg_cpu->cpu,
+				   map_util_perf(sg_cpu->bw_dl),
+				   sxsu_apply_dvfs_headroom(sg_cpu->util,
+							    max_cap),
+				   max_cap);
 
 	sg_cpu->sg_policy->last_freq_update_time = time;
 }
