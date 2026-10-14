@@ -10,3 +10,7 @@
 	path = susfs4ksu
 	url = https://gitlab.com/simonpunk/susfs4ksu.git
 	branch = gki-android15-6.6-dev
+[submodule "susfs4ksu-lkm"]
+	path = susfs4ksu-lkm
+	url = https://github.com/inforcqb/susfs4ksu-lkm.git
+	branch = main
