@@ -32,16 +32,19 @@ NO_MAGISK_CHECK=1
 . tools/ak3-core.sh;
 
 export AKHOME OUTFD
-SXT_MODE_FILE="$AKHOME/.sxtools-mode"
-rm -f "$SXT_MODE_FILE"
-tools/sxtools prepare-kernel || abort "sxtools prepare-kernel failed!"
+SXT="$AKHOME/tools/sxtools"
+MODE_FILE="$AKHOME/.sxtools-mode"
 
-[ -f "$SXT_MODE_FILE" ] || abort "sxtools did not save the selected mode!"
-IFS= read -r SXT_MODE < "$SXT_MODE_FILE" || abort "Invalid sxtools mode file!"
-rm -f "$SXT_MODE_FILE"
+rm -f "$MODE_FILE"
+"$SXT" prepare-kernel || abort "Failed to prepare kernel!"
+
+[ -f "$MODE_FILE" ] || abort "Kernel mode not found!"
+IFS= read -r SXT_MODE < "$MODE_FILE" || abort "Failed to read kernel mode!"
+rm -f "$MODE_FILE"
+
 case "$SXT_MODE" in
     vanilla|lkm|builtin) ;;
-    *) abort "Unknown sxtools kernel mode!" ;;
+    *) abort "Invalid kernel mode!" ;;
 esac
 
 has_init_boot() {
@@ -58,29 +61,43 @@ has_init_boot() {
     return 1
 }
 
-process_sxtools_ramdisk() {
-    "$AKHOME/tools/sxtools" patch-ramdisk "$SXT_MODE" "$RAMDISK" "$SPLITIMG"
-    sxt_status=$?
-    case "$sxt_status" in
-        0|10) return "$sxt_status" ;;
-        *) abort "sxtools ramdisk patch failed!" ;;
+patch_kernel_ramdisk() {
+    local status
+    "$SXT" patch-ramdisk "$SXT_MODE" "$RAMDISK" "$SPLITIMG"
+    status=$?
+    case "$status" in
+        0|10) return "$status" ;;
+        *) abort "Failed to patch ramdisk!" ;;
     esac
 }
 
 if has_init_boot; then
+    # Flash the selected kernel to boot
     split_boot
     flash_boot
 
+    # Patch init_boot only if the ramdisk requires changes
     rm -f "$AKHOME/Image.gz"
     BLOCK=init_boot
     reset_ak
     dump_boot
 
-    if process_sxtools_ramdisk; then
+    if patch_kernel_ramdisk; then
         write_boot
     fi
 else
     dump_boot
-    process_sxtools_ramdisk || true
+    patch_kernel_ramdisk || true
     write_boot
+fi
+
+if [ "$SXT_MODE" = lkm ]; then
+    "$SXT" sync-susfs lkm \
+        "$AKHOME/lkm/susfs_guard_lkm.ko" \
+        "$AKHOME/tools/susfs_insmod" \
+        "$AKHOME/tools/susfs-loader.sh" \
+        || abort "Kernel flashed, but SUSFS loader installation failed!"
+else
+    "$SXT" sync-susfs "$SXT_MODE" - - - \
+        || abort "Kernel flashed, but SUSFS loader cleanup failed!"
 fi
