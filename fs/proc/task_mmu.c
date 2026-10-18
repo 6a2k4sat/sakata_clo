@@ -1084,7 +1084,7 @@ static int show_smap(struct seq_file *m, void *v)
 		if (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
 			return 0;
 	}
-#endif
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
 
 	memset(&mss, 0, sizeof(mss));
 
