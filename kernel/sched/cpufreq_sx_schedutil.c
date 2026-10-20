@@ -393,10 +393,22 @@ static void sxsu_iowait_apply(struct sxsu_cpu *sg_cpu, u64 time,
 
 	if (!sg_cpu->iowait_boost_pending) {
 		/*
-		 * No boost pending; reduce the boost value.
+		 * No new I/O boost is pending. Keep the initial response and
+		 * minimum boost behavior unchanged, but retain only 7/16 of the
+		 * previous boost instead of schedutil's 1/2 while above the
+		 * minimum level.
+		 *
+		 * Clamp the decay to IOWAIT_BOOST_MIN so the minimum boost gets
+		 * the same final grace period as the original implementation.
 		 */
-		sg_cpu->iowait_boost >>= 1;
-		if (sg_cpu->iowait_boost < IOWAIT_BOOST_MIN) {
+		if (sg_cpu->iowait_boost > IOWAIT_BOOST_MIN) {
+			sg_cpu->iowait_boost =
+				(sg_cpu->iowait_boost >> 1) -
+				(sg_cpu->iowait_boost >> 4);
+
+			if (sg_cpu->iowait_boost < IOWAIT_BOOST_MIN)
+				sg_cpu->iowait_boost = IOWAIT_BOOST_MIN;
+		} else {
 			sg_cpu->iowait_boost = 0;
 			return;
 		}
